@@ -20,8 +20,6 @@ type
     tagMask*: array[16, uint8]
     headerDone*: bool
 
-# ─── Init ───
-
 template gcmInit*[C; B, K, N, T: static int](init, encrypt: untyped, ctx: var GCMCtx[C, B, K, N, T], key, nonce: openArray[uint8]): void =
   static: doAssert(B == 16, "GCM requires 128-bit block cipher")
   static: doAssert(B == N + T, "nonceSize + counterSize must equal blockSize")
@@ -50,8 +48,6 @@ template gcmEncryptFinal*[C; B, K, N, T: static int](encrypt: untyped, ctx: var 
   static: doAssert(tagLen <= 16 and tagLen > 0, "Invalid tag length")
 
   let tail = ctrFinal(encrypt, ctx.ctr)
-  if tail.len > 0:
-    gmacInput(ctx.gmac, tail)
 
   let fullTag = gmacFinal(ctx.gmac, ctx.tagMask)
 
@@ -70,8 +66,6 @@ template gcmDecryptFinal*[C; B, K, N, T: static int](encrypt: untyped, ctx: var 
   static: doAssert(tagLen <= 16 and tagLen > 0, "Invalid tag length")
 
   let tail = ctrFinal(encrypt, ctx.ctr)
-  if tail.len > 0:
-    gmacInput(ctx.gmac, tail)
 
   let computedFullTag = gmacFinal(ctx.gmac, ctx.tagMask)
 
@@ -82,13 +76,13 @@ template gcmDecryptFinal*[C; B, K, N, T: static int](encrypt: untyped, ctx: var 
   if diff != 0:
     Result[seq[uint8], ModeError](kind: Failure, error: PaddingError)
   else:
-    Result[seq[uint8], ModeError](kind: Success, value: @[])
+    Result[seq[uint8], ModeError](kind: Success, value: tail)
 
 template gcmEncryptOne*[C; B, K, N, T: static int](init, encrypt: untyped, key, nonce, header, plaintext: openArray[uint8], tagLen: static int): tuple[ciphertext: seq[uint8], tag: array[tagLen, uint8]] =
   var ctx: GCMCtx[C, B, K, N, T]
   gcmInit(init, encrypt, ctx, key, nonce)
-  gcmAddHeader(ctx, header)
-  gcmFinishHeader(ctx)
+  gcmHeaderInput(ctx, header)
+  gcmHeaderFinal(ctx)
   let ct = gcmEncryptInput(encrypt, ctx, plaintext)
   let (tail, tag) = gcmEncryptFinal(encrypt, ctx, tagLen)
   var ciphertext = ct
@@ -99,14 +93,14 @@ template gcmEncryptOne*[C; B, K, N, T: static int](init, encrypt: untyped, key, 
 template gcmDecryptOne*[C; B, K, N, T: static int](init, encrypt: untyped, key, nonce, header, ciphertext, expectedTag: openArray[uint8], tagLen: static int): Result[seq[uint8], ModeError] =
   var ctx: GCMCtx[C, B, K, N, T]
   gcmInit(init, encrypt, ctx, key, nonce)
-  gcmAddHeader(ctx, header)
-  gcmFinishHeader(ctx)
+  gcmHeaderInput(ctx, header)
+  gcmHeaderFinal(ctx)
   let pt = gcmDecryptInput(encrypt, ctx, ciphertext)
-  let result = gcmDecryptFinal(encrypt, ctx, expectedTag, tagLen)
-  if result.kind == Success:
+  let output = gcmDecryptFinal(encrypt, ctx, expectedTag, tagLen)
+  if output.kind == Success:
     var plaintext = pt
-    if result.value.len > 0:
-      plaintext.add(result.value)
+    if output.value.len > 0:
+      plaintext.add(output.value)
     Result[seq[uint8], ModeError](kind: Success, value: plaintext)
   else:
-    result
+    Result[seq[uint8], ModeError](kind: Failed, error: TagError)
