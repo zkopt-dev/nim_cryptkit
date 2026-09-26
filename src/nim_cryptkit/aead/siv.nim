@@ -42,7 +42,6 @@ template sivS2V[C; B: static int](init, encrypt: untyped, key: openArray[uint8],
 
 template sivToQ(v: array[16, uint8]): array[16, uint8] =
   var q = v
-  q[8] = q[8] and 0x7F'u8
   q[12] = q[12] and 0x7F'u8
   q
 
@@ -96,7 +95,6 @@ template sivDecryptOne*[C; B, K: static int](init, encrypt: untyped, key: openAr
     diff = diff or (v2[i] xor iv[i])
 
   if diff != 0:
-    zeroMem(addr plaintext[0], plaintext.len)
-    Result[seq[uint8], ModeError](kind: Failure, error: PaddingError)
+    Result[seq[uint8], ModeError](kind: Failure, error: TagError)
   else:
     Result[seq[uint8], ModeError](kind: Success, value: plaintext)
