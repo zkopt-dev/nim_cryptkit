@@ -32,6 +32,10 @@ type
 
 template ocbInit*[C; B: static int](init, encrypt: untyped, ctx: var OCBCtx[C, B], key, nonce: openArray[uint8]): void =
   static: doAssert(B == 16, "OCB requires 128-bit block cipher")
+
+  # 논스 길이 검증: OCB3는 1~120비트 (1~15바이트)
+  doAssert(nonce.len >= 1 and nonce.len <= 15, "OCB nonce must be 1..15 bytes")
+
   zeroMem(addr ctx, sizeof(ctx))
   init(ctx.context, key)
 
@@ -43,8 +47,8 @@ template ocbInit*[C; B: static int](init, encrypt: untyped, ctx: var OCBCtx[C, B
     ctx.lTable[i] = ocbDouble(ctx.lTable[i - 1])
 
   var nonceBlock: array[B, uint8]
-  copyMem(addr nonceBlock[0], unsafeAddr nonce[0], min(nonce.len, B))
-  nonceBlock[15] = nonceBlock[15] xor uint8(min(nonce.len, B))
+  copyMem(addr nonceBlock[0], unsafeAddr nonce[0], nonce.len)
+  nonceBlock[15] = nonceBlock[15] xor uint8(nonce.len)
   encrypt(ctx.context, nonceBlock, ctx.delta)
 
   ctx.headerDone = false
@@ -56,6 +60,7 @@ template ocbHeaderInput*[C; B: static int](encrypt: untyped, ctx: var OCBCtx[C, 
   var index = ctx.aadBufferLen
   let left = B - index
   var position = 0
+
   if aadLen >= left and left > 0:
     copyMem(addr ctx.aadBuffer[index], unsafeAddr aad[0], left)
     position = left
@@ -106,7 +111,8 @@ template ocbHeaderFinal*[C; B: static int](encrypt: untyped, ctx: var OCBCtx[C, 
   ctx.headerDone = true
 
 template ocbEncryptInput*[C; B: static int](encrypt: untyped, ctx: var OCBCtx[C, B], plaintext: openArray[uint8]): seq[uint8] =
-  doAssert(ctx.headerDone, "Call ocbFinishHeader first")
+  doAssert(ctx.headerDone, "Call ocbHeaderFinal first")
+
   let inputLen = plaintext.len
   if inputLen <= 0: return newSeq[uint8](0)
 
@@ -118,8 +124,7 @@ template ocbEncryptInput*[C; B: static int](encrypt: untyped, ctx: var OCBCtx[C,
   let fullBlocks = (index + inputLen) div B
   var output = newSeq[uint8](fullBlocks * B)
 
-  # Step 1: buffer 채워서 첫 완전 블록
-  if inputLen >= left and left > 0:
+  if inputLen >= left:
     copyMem(addr ctx.buffer[index], unsafeAddr plaintext[0], left)
     position = left
     index = 0
@@ -202,6 +207,8 @@ template ocbEncryptFinal*[C; B, T: static int](encrypt: untyped, ctx: var OCBCtx
   (tail: tail, tag: tag)
 
 template ocbDecryptInput*[C; B: static int](decrypt: untyped, ctx: var OCBCtx[C, B], ciphertext: openArray[uint8]): seq[uint8] =
+  doAssert(ctx.headerDone, "Call ocbHeaderFinal first")
+
   let inputLen = ciphertext.len
   if inputLen <= 0: return newSeq[uint8](0)
 
@@ -213,7 +220,7 @@ template ocbDecryptInput*[C; B: static int](decrypt: untyped, ctx: var OCBCtx[C,
   let fullBlocks = (index + inputLen) div B
   var output = newSeq[uint8](fullBlocks * B)
 
-  if inputLen >= left and left > 0:
+  if inputLen >= left:
     copyMem(addr ctx.buffer[index], unsafeAddr ciphertext[0], left)
     position = left
     index = 0
@@ -262,6 +269,8 @@ template ocbDecryptInput*[C; B: static int](decrypt: untyped, ctx: var OCBCtx[C,
 template ocbDecryptFinal*[C; B, T: static int](encrypt, decrypt: untyped, ctx: var OCBCtx[C, B], expectedTag: openArray[uint8], tagLen: static int): Result[tuple[tail: seq[uint8]], ModeError] =
   static: doAssert(tagLen >= 1 and tagLen <= B)
 
+  doAssert(expectedTag.len >= tagLen, "expectedTag too short")
+
   var tail: seq[uint8]
 
   if ctx.index > 0:
@@ -296,7 +305,8 @@ template ocbDecryptFinal*[C; B, T: static int](encrypt, decrypt: untyped, ctx: v
     diff = diff or (computedFull[i] xor expectedTag[i])
 
   if diff != 0:
-    zeroMem(addr tail[0], tail.len)
-    Result[tuple[tail: seq[uint8]], ModeError](kind: Failure, error: PaddingError)
+    if tail.len > 0:
+      zeroMem(addr tail[0], tail.len)
+    Result[tuple[tail: seq[uint8]], ModeError](kind: Failure, error: TagError)
   else:
-    Result[tuple[tail: seq[uint8]], ModeError](kind: Success, value: (tail: tail,))
+    Result[tuple[tail: seq[uint8]], ModeError](kind: Success, value: tail)
