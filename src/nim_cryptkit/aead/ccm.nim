@@ -17,7 +17,7 @@ type
   ModeError = enum
     WrongInputLen, PaddingError
 
-template ccmmacInit[C; B, T: static int](init: untyped, ctx: var CBCMACCtx[C, B, T], key, nonce: openArray[uint8], msgLen: uint64, addLen: int): void =
+template ccmmacInit[C; B, T: static int](init: untyped, ctx: var CBCMACCtx[C, B], key, nonce: openArray[uint8], msgLen: uint64, adaLen: int): void =
   static: doAssert B == 16, "CCM requires 128-bit block"
   static: doAssert T >= 4 and T <= 16 and T mod 2 == 0
 
@@ -32,7 +32,7 @@ template ccmmacInit[C; B, T: static int](init: untyped, ctx: var CBCMACCtx[C, B,
   zeroMem(addr b0[0], B)
 
   var flags: uint8 = uint8((q - 1) and 0x07)
-  flags = flags or uint8(((tagLen - 2) div 2) shl 3)
+  flags = flags or uint8(((T - 2) div 2) shl 3)
   if aadLen > 0: flags = flags or 0x40'u8
   b0[0] = flags
 
@@ -52,11 +52,26 @@ template ccmMacAddAAD*[C; B: static int](encrypt: untyped, ctx: var CBCMACCtx[C,
   let aadLen = aad.len
   if aadLen == 0: return
 
-  var hdr: array[2, uint8]
-  hdr[0] = uint8((aadLen shr 8) and 0xFF)
-  hdr[1] = uint8(aadLen and 0xFF)
+  if aadLen < 65280:
+    var hdr: array[2, uint8]
+    hdr[0] = uint8((aadLen shr 8) and 0xFF)
+    hdr[1] = uint8(aadLen and 0xFF)
+    cbcmacInput(ctx, encrypt, hdr.toOpenArray(0, 1))
+  elif aadLen < 4294967296'u64:
+    var hdr: array[6, uint8]
+    hdr[0] = 0xFF; hdr[1] = 0xFE
+    hdr[2] = uint8((aadLen shr 24) and 0xFF)
+    hdr[3] = uint8((aadLen shr 16) and 0xFF)
+    hdr[4] = uint8((aadLen shr 8) and 0xFF)
+    hdr[5] = uint8(aadLen and 0xFF)
+    cbcmacInput(ctx, encrypt, hdr.toOpenArray(0, 5))
+  else:
+    var hdr: array[10, uint8]
+    hdr[0] = 0xFF; hdr[1] = 0xFF
+    for i in 0..7:
+      hdr[2 + i] = uint8((aadLen shr ((7 - i) * 8)) and 0xFF)
+    cbcmacInput(ctx, encrypt, hdr.toOpenArray(0, 9))
 
-  cbcmacInput(ctx, encrypt, hdr.toOpenArray(0, 1))
   cbcmacInput(ctx, encrypt, aad)
 
 template ccmMacFinal*[C; B, T: static int](encrypt: untyped, ctx: var CBCMACCtx[C, B]): CCMTag[T] =
@@ -122,7 +137,7 @@ template ccmEncryptOne*[C; B, K, T: static int](init, encrypt: untyped, key, non
   ccmMacInit(init, key, macCtx, nonce, uint64(msgLen), aadLen, T)
   ccmMacAddAAD(encrypt, macCtx, aad)
   cbcmacInput(encrypt, macCtx, plaintext)
-  var rawTag: array[T, uint8] = ccmMacFinalize[C, B, T](encrypt, macCtx)
+  var rawTag: array[T, uint8] = ccmMacFinal[C, B, T](encrypt, macCtx)
 
   var ciphertext = newSeq[uint8](msgLen)
 
@@ -132,7 +147,6 @@ template ccmEncryptOne*[C; B, K, T: static int](init, encrypt: untyped, key, non
   copyMem(addr s0[1], addr nonce[0], nonceLen)
   encrypt(macCtx.context, s0, s0)
 
-  var ciphertext = newSeq[uint8](msgLen)
   ccmCtrProcess(encrypt, macCtx.context, nonce, plaintext, ciphertext, 1'u64)
 
   var s0: array[B, uint8]
