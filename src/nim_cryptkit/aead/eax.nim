@@ -28,13 +28,19 @@ template eaxInit*[C; B, K, N, T: static int](init, encrypt: untyped, ctx: var EA
 
   var nonceMac: CMACCtx[C, B]
   cmacInit(nonceMac, init, encrypt, key)
+  var zeroBlock: array[B, uint8]
+  cmacInput(nonceMac, encrypt, zeroBlock)
   cmacInput(nonceMac, encrypt, nonce)
   ctx.nonceTag = cmacFinal(nonceMac, encrypt)
 
-  cmacInit(ctx.headerMac, init, encrypt, key)
+  var tweak1: array[B, uint8]
+  tweak1[B - 1] = 0x01'u8
+  cmacInput(ctx.headerMac, encrypt, tweak1)
   ctx.headerDone = false
 
-  cmacInit(ctx.cipherMac, init, encrypt, key)
+  var tweak2: array[B, uint8]
+  tweak2[B - 1] = 0x02'u8
+  cmacInput(ctx.cipherMac, encrypt, tweak2)
 
 template eaxHeaderInput*[C; B, K, N, T: static int](encrypt: untyped, ctx: var EAXCtx[C, B, K, N, T], header: openArray[uint8]): void =
   cmacInput(ctx.headerMac, encrypt, header)
@@ -81,7 +87,6 @@ template eaxDecryptFinal*[C; B, K, N, T: static int](encrypt: untyped, ctx: var 
   let tail = ctrFinal(encrypt, ctx.ctr)
   var plaintextTail: seq[uint8]
   if tail.len > 0:
-    cmacInput(ctx.cipherMac, encrypt, tail)
     plaintextTail = tail
 
   let hTag = cmacFinal(ctx.headerMac, encrypt)
@@ -100,7 +105,7 @@ template eaxDecryptFinal*[C; B, K, N, T: static int](encrypt: untyped, ctx: var 
   if diff != 0:
     Result[seq[uint8], ModeError](kind: Failure, error: PaddingError)
   else:
-    Result[seq[uint8], ModeError](kind: Success, value: @[])
+    Result[seq[uint8], ModeError](kind: Success, value: plaintextTail)
 
 template eaxEncryptOne*[C; B, K, N, T: static int](
     init, encrypt: untyped,
@@ -109,8 +114,8 @@ template eaxEncryptOne*[C; B, K, N, T: static int](
 ): tuple[ciphertext: seq[uint8], tag: array[tagLen, uint8]] =
   var ctx: EAXCtx[C, B, K, N, T]
   eaxInit(init, encrypt, ctx, key, nonce)
-  eaxAddHeader(encrypt, ctx, header)
-  eaxFinishHeader(encrypt, ctx)
+  eaxHeaderInput(encrypt, ctx, header)
+  eaxHeaderFinal(encrypt, ctx)
   let ct = eaxEncryptInput(encrypt, ctx, plaintext)
   let (tail, tag) = eaxEncryptFinal(encrypt, ctx, tagLen)
   var ciphertext = ct
@@ -125,8 +130,8 @@ template eaxDecryptOne*[C; B, K, N, T: static int](
 ): Result[seq[uint8], ModeError] =
   var ctx: EAXCtx[C, B, K, N, T]
   eaxInit(init, encrypt, ctx, key, nonce)
-  eaxAddHeader(encrypt, ctx, header)
-  eaxFinishHeader(encrypt, ctx)
+  eaxHeaderInput(encrypt, ctx, header)
+  eaxHeaderFinal(encrypt, ctx)
   let pt = eaxDecryptInput(encrypt, ctx, ciphertext)
   let result = eaxDecryptFinal(encrypt, ctx, expectedTag, tagLen)
   if result.kind == Success:
