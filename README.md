@@ -1,6 +1,6 @@
-# Nim_Cryptography
+# nim_cryptkit
 
-## Nim_Cryptography : Nim's biggest cryptography library
+## nim_cryptkit : Nim's biggest cryptography library
 
 ## SUPPORTED CIPHERS
 
