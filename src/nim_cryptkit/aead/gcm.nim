@@ -1,0 +1,121 @@
+import ../mac/gmac
+import ../mode/ctr
+import ../mode/padding
+
+import ../utils/endian
+import ../utils/digits
+import ../utils/bitutils
+import ../utils/envconst
+import ../utils/slicearray
+import ../utils/optmacro
+import ../utils/errorutils
+import ../utils/vectorop
+import std/[monotimes, times]
+import std/bitops
+import strutils
+
+type
+  GCMCtx*[C; blockSize, keySize, nonceSize, counterSize: static int] = object
+    ctr*: CTRCtx[C, blockSize, keySize, nonceSize, counterSize]
+    gmac*: GMACCtx
+    tagMask*: array[16, uint8]
+    headerDone*: bool
+
+template gcmInit*[C; B, K, N, T: static int](init, encrypt: untyped, ctx: var GCMCtx[C, B, K, N, T], key, nonce: openArray[uint8]): void =
+  static: doAssert(B == 16, "GCM requires 128-bit block cipher")
+  static: doAssert(B == N + T, "nonceSize + counterSize must equal blockSize")
+
+  gmacInit[C](ctx.gmac, init, encrypt, key)
+
+  # J0 = IV || 0^31 || 1 for a 96-bit IV, GHASH-derived otherwise.
+  let j0 = generateNonce(ctx.gmac.h, nonce)
+  ctx.tagMask = generateTagMask[C](init, encrypt, key, nonce)
+
+  var j0Nonce: array[N, uint8]
+  var counterValue: uint64 = 0
+  unroll(i, 0, N - 1):
+    j0Nonce[i] = j0[i]
+  unroll(i, N, N + T - 1):
+    counterValue = (counterValue shl 8) or uint64(j0[i])
+
+  # Encryption uses the counter blocks J0+1, J0+2, ...
+  ctrInit(init, ctx.ctr, key, j0Nonce, BigEndian, int(counterValue) + 1)
+
+  ctx.headerDone = false
+
+template gcmHeaderInput*[C; B, K, N, T: static int](ctx: var GCMCtx[C, B, K, N, T], header: openArray[uint8]): void =
+  doAssert(not ctx.headerDone, "Header must be added before encryption")
+  gmacAadInput(ctx.gmac, header)
+
+template gcmHeaderFinal*[C; B, K, N, T: static int](ctx: var GCMCtx[C, B, K, N, T]): void =
+  gmacAadFinal(ctx.gmac)
+  ctx.headerDone = true
+
+template gcmEncryptInput*[C; B, K, N, T: static int](encrypt: untyped, ctx: var GCMCtx[C, B, K, N, T], plaintext: openArray[uint8]): seq[uint8] =
+  let ciphertext = ctrInput(encrypt, ctx.ctr, plaintext)
+  gmacInput(ctx.gmac, ciphertext)
+  ciphertext
+
+template gcmEncryptFinal*[C; B, K, N, T: static int](encrypt: untyped, ctx: var GCMCtx[C, B, K, N, T], tagLen: static int): tuple[tail: seq[uint8], tag: array[tagLen, uint8]] =
+  static: doAssert(tagLen <= 16 and tagLen > 0, "Invalid tag length")
+
+  let tail = ctrFinal(encrypt, ctx.ctr)
+
+  if tail.len > 0:
+    gmacInput(ctx.gmac, tail)
+
+  let fullTag = gmacFinal(ctx.gmac, ctx.tagMask)
+
+  var tag: array[tagLen, uint8]
+  for i in 0 ..< tagLen:
+    tag[i] = fullTag[i]
+
+  (tail: tail, tag: tag)
+
+template gcmDecryptInput*[C; B, K, N, T: static int](encrypt: untyped, ctx: var GCMCtx[C, B, K, N, T], ciphertext: openArray[uint8]): seq[uint8] =
+  gmacInput(ctx.gmac, ciphertext)
+  let plaintext = ctrInput(encrypt, ctx.ctr, ciphertext)
+  plaintext
+
+template gcmDecryptFinal*[C; B, K, N, T: static int](encrypt: untyped, ctx: var GCMCtx[C, B, K, N, T], expectedTag: openArray[uint8], tagLen: static int): Result[seq[uint8], ModeError] =
+  static: doAssert(tagLen <= 16 and tagLen > 0, "Invalid tag length")
+
+  let tail = ctrFinal(encrypt, ctx.ctr)
+
+  let computedFullTag = gmacFinal(ctx.gmac, ctx.tagMask)
+
+  var diff: uint8 = 0
+  for i in 0 ..< tagLen:
+    diff = diff or (computedFullTag[i] xor expectedTag[i])
+
+  if diff != 0:
+    Result[seq[uint8], ModeError](kind: Failure, error: TagError)
+  else:
+    Result[seq[uint8], ModeError](kind: Success, value: tail)
+
+template gcmEncryptOne*[C; B, K, N, T: static int](init, encrypt: untyped, key, nonce, header, plaintext: openArray[uint8], tagLen: static int): tuple[ciphertext: seq[uint8], tag: array[tagLen, uint8]] =
+  var ctx: GCMCtx[C, B, K, N, T]
+  gcmInit(init, encrypt, ctx, key, nonce)
+  gcmHeaderInput(ctx, header)
+  gcmHeaderFinal(ctx)
+  let ct = gcmEncryptInput(encrypt, ctx, plaintext)
+  let (tail, tag) = gcmEncryptFinal(encrypt, ctx, tagLen)
+  var ciphertext = ct
+  if tail.len > 0:
+    ciphertext.add(tail)
+  (ciphertext: ciphertext, tag: tag)
+
+template gcmDecryptOne*[C; B, K, N, T: static int](init, encrypt: untyped, key, nonce, header, ciphertext, expectedTag: openArray[uint8], tagLen: static int): Result[seq[uint8], ModeError] =
+  var ctx: GCMCtx[C, B, K, N, T]
+  gcmInit(init, encrypt, ctx, key, nonce)
+  gcmHeaderInput(ctx, header)
+  gcmHeaderFinal(ctx)
+  let pt = gcmDecryptInput(encrypt, ctx, ciphertext)
+  let output = gcmDecryptFinal(encrypt, ctx, expectedTag, tagLen)
+  if output.kind == Success:
+    var plaintext = pt
+    if output.value.len > 0:
+      plaintext.add(output.value)
+    Result[seq[uint8], ModeError](kind: Success, value: plaintext)
+  else:
+    Result[seq[uint8], ModeError](kind: Failure, error: TagError)
